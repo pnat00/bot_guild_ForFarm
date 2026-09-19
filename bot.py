@@ -4,17 +4,19 @@ from threading import Thread
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Select, View, button, Button
-# pyrefly: ignore [missing-import]
 from flask import Flask
+from dotenv import load_dotenv
+
+load_dotenv()  # ตัวสั่งให้ Python อ่านไฟล์ .env ในเครื่อง
 
 # ---------------------------------------------------------
-# Web Server สำหรับ Koyeb Health Check (ป้องกันบอทโดนตัดสาย)
+# Web Server สำหรับ Keep Alive / Health Check
 # ---------------------------------------------------------
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is running 24/7 on Koyeb!"
+    return "Bot is running 24/7!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -52,6 +54,9 @@ TIME_SLOTS = {
     "23:00": "🌌 หลัง 5 ทุ่ม",
 }
 
+# ตัวแปร Global สำหรับเก็บอ้างอิงข้อความ (Message References) ทั้งของลูกกิลด์และแอดมิน
+user_war_message = None   
+user_time_message = None  
 admin_house_message = None  
 admin_time_message = None   
 
@@ -101,11 +106,10 @@ class HouseSelect(Select):
         else:
             booked_houses[selected_house_id] = user.id
 
-        new_view = WarDashboardView()
-        new_embed = create_war_embed()
-        await interaction.response.edit_message(embed=new_embed, view=new_view)
-
-        await refresh_admin_views()
+        # defer ก่อนเพื่อไม่ให้เกิด Interaction Failed
+        await interaction.response.defer()
+        # รีเฟรชทั้งตารางฝั่งลูกกิลด์และแผงแอดมินให้ตรงกัน
+        await refresh_all_views()
 
 
 class WarDashboardView(View):
@@ -145,11 +149,8 @@ class TimeSelect(Select):
         else:
             user_time_slots[user_id] = selected_time
 
-        new_view = TimeDashboardView()
-        new_embed = create_time_embed()
-        await interaction.response.edit_message(embed=new_embed, view=new_view)
-
-        await refresh_admin_views()
+        await interaction.response.defer()
+        await refresh_all_views()
 
 
 class TimeDashboardView(View):
@@ -200,7 +201,7 @@ class AdminUnbookSelect(Select):
         if selected_house_id in booked_houses:
             del booked_houses[selected_house_id]
 
-        await refresh_admin_views()
+        await refresh_all_views()
 
 
 class AdminRemoveTimeSelect(Select):
@@ -241,7 +242,7 @@ class AdminRemoveTimeSelect(Select):
         if selected_user_id in user_time_slots:
             del user_time_slots[selected_user_id]
 
-        await refresh_admin_views()
+        await refresh_all_views()
 
 
 class AdminHouseControlView(View):
@@ -254,7 +255,7 @@ class AdminHouseControlView(View):
     async def reset_houses_button(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer()
         booked_houses.clear()
-        await refresh_admin_views()
+        await refresh_all_views()
 
 
 class AdminTimeControlView(View):
@@ -268,7 +269,7 @@ class AdminTimeControlView(View):
         await interaction.response.defer()
         booked_houses.clear()
         user_time_slots.clear()
-        await refresh_admin_views()
+        await refresh_all_views()
 
 
 # ---------------------------------------------------------
@@ -354,15 +355,32 @@ def create_time_embed():
     return embed
 
 
-async def refresh_admin_views():
-    global admin_house_message, admin_time_message
+async def refresh_all_views():
+    """อัปเดตข้อความและเมนูทั้งฝั่งลูกกิลด์และแอดมินทุกห้องให้ตรงกับข้อมูลปัจจุบัน"""
+    global user_war_message, user_time_message, admin_house_message, admin_time_message
 
+    # 1. อัปเดตห้องจองบ้านของลูกกิลด์
+    if user_war_message:
+        try:
+            await user_war_message.edit(embed=create_war_embed(), view=WarDashboardView())
+        except Exception as e:
+            print(f"Error refreshing user war view: {e}")
+
+    # 2. อัปเดตห้องลงเวลาของลูกกิลด์
+    if user_time_message:
+        try:
+            await user_time_message.edit(embed=create_time_embed(), view=TimeDashboardView())
+        except Exception as e:
+            print(f"Error refreshing user time view: {e}")
+
+    # 3. อัปเดตแผงปลดล็อกบ้านฝั่งแอดมิน
     if admin_house_message:
         try:
             await admin_house_message.edit(view=AdminHouseControlView())
         except Exception as e:
             print(f"Error refreshing admin house view: {e}")
 
+    # 4. อัปเดตแผงลบเวลาฝั่งแอดมิน
     if admin_time_message:
         try:
             await admin_time_message.edit(view=AdminTimeControlView())
@@ -380,7 +398,7 @@ async def auto_reset_task():
     global booked_houses, user_time_slots
     booked_houses.clear()
     user_time_slots.clear()
-    await refresh_admin_views()
+    await refresh_all_views()
 
 @bot.event
 async def on_ready():
@@ -391,6 +409,7 @@ async def on_ready():
 @bot.command(name="setup_war")
 @commands.has_permissions(administrator=True)
 async def setup_war(ctx):
+    global user_war_message
     try:
         await ctx.message.delete()
     except Exception as e:
@@ -398,11 +417,12 @@ async def setup_war(ctx):
     
     menu_view = WarDashboardView()
     embed = create_war_embed()
-    await ctx.send("⚔️ **ระบบจองบ้านกิลด์วอร์**", embed=embed, view=menu_view)
+    user_war_message = await ctx.send("⚔️ **ระบบจองบ้านกิลด์วอร์**", embed=embed, view=menu_view)
 
 @bot.command(name="setup_time")
 @commands.has_permissions(administrator=True)
 async def setup_time(ctx):
+    global user_time_message
     try:
         await ctx.message.delete()
     except Exception as e:
@@ -410,7 +430,7 @@ async def setup_time(ctx):
     
     menu_view = TimeDashboardView()
     embed = create_time_embed()
-    await ctx.send(embed=embed, view=menu_view)
+    user_time_message = await ctx.send(embed=embed, view=menu_view)
 
 @bot.command(name="setup_admin")
 @commands.has_permissions(administrator=True)
@@ -438,15 +458,14 @@ async def reset_war(ctx):
         
     booked_houses.clear()
     user_time_slots.clear()
-    await refresh_admin_views()
+    await refresh_all_views()
 
 # ---------------------------------------------------------
-# จุดเริ่มต้นการทำงานบน Koyeb
+# จุดเริ่มต้นการทำงาน
 # ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()  # เรียกเปิด Web Server ตรวจสอบสถานะ
     
-    # อ่าน Token จาก Environment Variable เพื่อความปลอดภัย
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
         bot.run(TOKEN)
