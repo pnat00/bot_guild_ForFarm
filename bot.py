@@ -8,7 +8,7 @@ from discord.ui import Select, View, button, Button
 from flask import Flask
 from dotenv import load_dotenv
 
-load_dotenv()  # ตัวสั่งให้ Python อ่านไฟล์ .env ในเครื่อง
+load_dotenv()
 
 # ---------------------------------------------------------
 # Web Server สำหรับ Keep Alive / Health Check
@@ -38,7 +38,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ---------------------------------------------------------
 # ระบบเก็บข้อมูลในหน่วยความจำ (In-Memory Data Structures)
 # ---------------------------------------------------------
-booked_houses = {}      # Format: {"MAIN-1": user_id, "IN1-3": user_id}
+# เปลี่ยนเป็นเก็บ list ของ user_id เพื่อรองรับการจองหลายคน
+# Format: {"MAIN-1": [user_id1, user_id2], "IN1-3": [user_id3]}
+booked_houses = {}      
 user_time_slots = {}    # Format: {user_id: "21:00"}
 
 HOUSES_CONFIG = {
@@ -55,7 +57,7 @@ TIME_SLOTS = {
     "23:00": "🌌 หลัง 5 ทุ่ม",
 }
 
-# ตัวแปร Global สำหรับเก็บอ้างอิงข้อความ (Message References)
+# ตัวแปร Global สำหรับเก็บอ้างอิงข้อความ
 user_war_message = None   
 user_time_message = None  
 admin_house_message = None  
@@ -74,11 +76,13 @@ class HouseSelect(Select):
         for i in range(1, config["count"] + 1):
             house_id = f"{zone_key}-{i}"
             
-            if house_id in booked_houses:
+            users = booked_houses.get(house_id, [])
+            if users:
+                count_str = f" ({len(users)} คน)" if len(users) > 1 else ""
                 options.append(discord.SelectOption(
-                    label=f"{config['prefix']} - {i} (จองแล้ว)",
+                    label=f"{config['prefix']} - {i}{count_str}",
                     value=house_id,
-                    description="กดซ้ำเพื่อยกเลิกการจอง",
+                    description="กดเพื่อจอง / กดซ้ำเพื่อยกเลิกการจองของคุณ",
                     emoji="🔴"
                 ))
             else:
@@ -99,13 +103,19 @@ class HouseSelect(Select):
 
     async def callback(self, interaction: discord.Interaction):
         selected_house_id = self.values[0]
-        user = interaction.user
+        user_id = interaction.user.id
 
-        if selected_house_id in booked_houses:
-            if booked_houses[selected_house_id] == user.id:
+        if selected_house_id not in booked_houses:
+            booked_houses[selected_house_id] = []
+
+        # ถ้าเคยจองไว้แล้ว กดซ้ำจะยกเลิก
+        if user_id in booked_houses[selected_house_id]:
+            booked_houses[selected_house_id].remove(user_id)
+            if not booked_houses[selected_house_id]:
                 del booked_houses[selected_house_id]
         else:
-            booked_houses[selected_house_id] = user.id
+            # เพิ่มชื่อต่อท้ายคิว
+            booked_houses[selected_house_id].append(user_id)
 
         await interaction.response.defer()
         await refresh_all_views()
@@ -169,14 +179,14 @@ class AdminUnbookSelect(Select):
         options = []
         for i in range(1, config["count"] + 1):
             house_id = f"{zone_key}-{i}"
-            if house_id in booked_houses:
-                user_id = booked_houses[house_id]
-                options.append(discord.SelectOption(
-                    label=f"ปลดล็อก: {config['prefix']} - {i}",
-                    value=house_id,
-                    description=f"ผู้จอง ID: {user_id}",
-                    emoji="🔓"
-                ))
+            if house_id in booked_houses and booked_houses[house_id]:
+                for uid in booked_houses[house_id]:
+                    options.append(discord.SelectOption(
+                        label=f"ปลด: {config['prefix']} - {i}",
+                        value=f"{house_id}:{uid}",
+                        description=f"ลบผู้จอง ID: {uid}",
+                        emoji="🔓"
+                    ))
 
         if not options:
             options.append(discord.SelectOption(
@@ -194,12 +204,16 @@ class AdminUnbookSelect(Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        selected_house_id = self.values[0]
+        if self.values[0] != "none":
+            house_id, uid_str = self.values[0].split(":")
+            target_uid = int(uid_str)
+            
+            if house_id in booked_houses and target_uid in booked_houses[house_id]:
+                booked_houses[house_id].remove(target_uid)
+                if not booked_houses[house_id]:
+                    del booked_houses[house_id]
+
         await interaction.response.defer()
-
-        if selected_house_id in booked_houses:
-            del booked_houses[selected_house_id]
-
         await refresh_all_views()
 
 
@@ -284,12 +298,15 @@ def create_war_embed():
         color=discord.Color.blue()
     )
 
+    # 1. จัดการบ้านหลัก
     main_status = []
     for i in range(1, 11):
         house_id = f"MAIN-{i}"
-        if house_id in booked_houses:
-            user_id = booked_houses[house_id]
-            main_status.append(f"🔴 **{i}**: <@{user_id}>")
+        users = booked_houses.get(house_id, [])
+        if users:
+            first_user = f"<@{users[0]}>"
+            count_suffix = f" **({len(users)})**" if len(users) > 1 else ""
+            main_status.append(f"🔴 **{i}**: {first_user}{count_suffix}")
         else:
             main_status.append(f"⚪ `{i}`")
 
@@ -299,14 +316,17 @@ def create_war_embed():
         inline=False
     )
 
+    # 2. จัดการบ้านใน (1-3)
     for zone_key in ["IN1", "IN2", "IN3"]:
         config = HOUSES_CONFIG[zone_key]
         status_list = []
         for i in range(1, config["count"] + 1):
             house_id = f"{zone_key}-{i}"
-            if house_id in booked_houses:
-                user_id = booked_houses[house_id]
-                status_list.append(f"🔴 **{i}**: <@{user_id}>")
+            users = booked_houses.get(house_id, [])
+            if users:
+                first_user = f"<@{users[0]}>"
+                count_suffix = f" **({len(users)})**" if len(users) > 1 else ""
+                status_list.append(f"🔴 **{i}**: {first_user}{count_suffix}")
             else:
                 status_list.append(f"⚪ `{i}`")
         
@@ -386,7 +406,6 @@ async def refresh_all_views():
 # ---------------------------------------------------------
 # Automated Tasks & Bot Commands
 # ---------------------------------------------------------
-# กำหนดเวลารีเซตอัตโนมัติเป็น 07:00 น. ตรงตาม timezone ประเทศไทย (Asia/Bangkok)
 RESET_TIME = datetime.time(hour=7, minute=0, second=0, tzinfo=ZoneInfo("Asia/Bangkok"))
 
 @tasks.loop(time=RESET_TIME)
@@ -461,7 +480,7 @@ async def reset_war(ctx):
 # จุดเริ่มต้นการทำงาน
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    keep_alive()  # เรียกเปิด Web Server ตรวจสอบสถานะ
+    keep_alive()
     
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
