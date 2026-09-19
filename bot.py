@@ -54,7 +54,7 @@ TIME_SLOTS = {
     "23:00": "🌌 หลัง 5 ทุ่ม",
 }
 
-# ตัวแปร Global สำหรับเก็บอ้างอิงข้อความ (Message References) ทั้งของลูกกิลด์และแอดมิน
+# ตัวแปร Global สำหรับเก็บอ้างอิงข้อความ (Message References)
 user_war_message = None   
 user_time_message = None  
 admin_house_message = None  
@@ -106,9 +106,7 @@ class HouseSelect(Select):
         else:
             booked_houses[selected_house_id] = user.id
 
-        # defer ก่อนเพื่อไม่ให้เกิด Interaction Failed
         await interaction.response.defer()
-        # รีเฟรชทั้งตารางฝั่งลูกกิลด์และแผงแอดมินให้ตรงกัน
         await refresh_all_views()
 
 
@@ -253,8 +251,10 @@ class AdminHouseControlView(View):
 
     @button(label="🧹 ล้างข้อมูลการจองบ้านทั้งหมด", style=discord.ButtonStyle.primary, row=4)
     async def reset_houses_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
         booked_houses.clear()
+        # สั่งอัปเดตหน้าต่าง UI ตัวเองทันทีเพื่อไม่ให้ค้าง
+        await interaction.response.edit_message(view=AdminHouseControlView())
+        # สั่งรีเฟรชข้อความห้องอื่นๆ ทั้งหมด
         await refresh_all_views()
 
 
@@ -266,9 +266,11 @@ class AdminTimeControlView(View):
 
     @button(label="⚠️ ล้างข้อมูลทั้งหมด (บ้าน + เวลา)", style=discord.ButtonStyle.danger, row=4)
     async def reset_all_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
         booked_houses.clear()
         user_time_slots.clear()
+        # สั่งอัปเดตหน้าต่าง UI ตัวเองทันทีเพื่อไม่ให้ค้าง
+        await interaction.response.edit_message(view=AdminTimeControlView())
+        # สั่งรีเฟรชข้อความห้องอื่นๆ ทั้งหมด
         await refresh_all_views()
 
 
