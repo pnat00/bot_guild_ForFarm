@@ -1,6 +1,7 @@
 import datetime
 import os
 from threading import Thread
+from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Select, View, button, Button
@@ -252,9 +253,7 @@ class AdminHouseControlView(View):
     @button(label="🧹 ล้างข้อมูลการจองบ้านทั้งหมด", style=discord.ButtonStyle.primary, row=4)
     async def reset_houses_button(self, interaction: discord.Interaction, button: Button):
         booked_houses.clear()
-        # สั่งอัปเดตหน้าต่าง UI ตัวเองทันทีเพื่อไม่ให้ค้าง
         await interaction.response.edit_message(view=AdminHouseControlView())
-        # สั่งรีเฟรชข้อความห้องอื่นๆ ทั้งหมด
         await refresh_all_views()
 
 
@@ -268,9 +267,7 @@ class AdminTimeControlView(View):
     async def reset_all_button(self, interaction: discord.Interaction, button: Button):
         booked_houses.clear()
         user_time_slots.clear()
-        # สั่งอัปเดตหน้าต่าง UI ตัวเองทันทีเพื่อไม่ให้ค้าง
         await interaction.response.edit_message(view=AdminTimeControlView())
-        # สั่งรีเฟรชข้อความห้องอื่นๆ ทั้งหมด
         await refresh_all_views()
 
 
@@ -361,28 +358,24 @@ async def refresh_all_views():
     """อัปเดตข้อความและเมนูทั้งฝั่งลูกกิลด์และแอดมินทุกห้องให้ตรงกับข้อมูลปัจจุบัน"""
     global user_war_message, user_time_message, admin_house_message, admin_time_message
 
-    # 1. อัปเดตห้องจองบ้านของลูกกิลด์
     if user_war_message:
         try:
             await user_war_message.edit(embed=create_war_embed(), view=WarDashboardView())
         except Exception as e:
             print(f"Error refreshing user war view: {e}")
 
-    # 2. อัปเดตห้องลงเวลาของลูกกิลด์
     if user_time_message:
         try:
             await user_time_message.edit(embed=create_time_embed(), view=TimeDashboardView())
         except Exception as e:
             print(f"Error refreshing user time view: {e}")
 
-    # 3. อัปเดตแผงปลดล็อกบ้านฝั่งแอดมิน
     if admin_house_message:
         try:
             await admin_house_message.edit(view=AdminHouseControlView())
         except Exception as e:
             print(f"Error refreshing admin house view: {e}")
 
-    # 4. อัปเดตแผงลบเวลาฝั่งแอดมิน
     if admin_time_message:
         try:
             await admin_time_message.edit(view=AdminTimeControlView())
@@ -393,7 +386,8 @@ async def refresh_all_views():
 # ---------------------------------------------------------
 # Automated Tasks & Bot Commands
 # ---------------------------------------------------------
-RESET_TIME = datetime.time(hour=7, minute=0, second=0)
+# กำหนดเวลารีเซตอัตโนมัติเป็น 07:00 น. ตรงตาม timezone ประเทศไทย (Asia/Bangkok)
+RESET_TIME = datetime.time(hour=7, minute=0, second=0, tzinfo=ZoneInfo("Asia/Bangkok"))
 
 @tasks.loop(time=RESET_TIME)
 async def auto_reset_task():
@@ -401,6 +395,7 @@ async def auto_reset_task():
     booked_houses.clear()
     user_time_slots.clear()
     await refresh_all_views()
+    print("[Auto Reset] เคลียร์ข้อมูลจองบ้านและเวลาตีประจำวันเรียบร้อยแล้ว (07:00 น. TH)")
 
 @bot.event
 async def on_ready():
