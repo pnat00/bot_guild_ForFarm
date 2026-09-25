@@ -33,15 +33,25 @@ def keep_alive():
 # ---------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class GuildWarBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
+        # ลงทะเบียน View ให้คงสถานะอยู่ถาวร (Persistent Views)
+        self.add_view(WarDashboardView())
+        self.add_view(TimeDashboardView())
+        self.add_view(AdminHouseControlView())
+        self.add_view(AdminTimeControlView())
+
+bot = GuildWarBot()
 
 # ---------------------------------------------------------
 # ระบบเก็บข้อมูลในหน่วยความจำ (In-Memory Data Structures)
 # ---------------------------------------------------------
-# เปลี่ยนเป็นเก็บ list ของ user_id เพื่อรองรับการจองหลายคน
-# Format: {"MAIN-1": [user_id1, user_id2], "IN1-3": [user_id3]}
 booked_houses = {}      
-user_time_slots = {}    # Format: {user_id: "21:00"}
+user_time_slots = {}    
 
 HOUSES_CONFIG = {
     "MAIN": {"label": "👑 บ้านหลัก", "placeholder": "ปลดล็อกบ้านหลัก", "count": 10, "prefix": "บ้านหลัก"},
@@ -57,15 +67,13 @@ TIME_SLOTS = {
     "23:00": "🌌 หลัง 5 ทุ่ม",
 }
 
-# ตัวแปร Global สำหรับเก็บอ้างอิงข้อความ
 user_war_message = None   
 user_time_message = None  
 admin_house_message = None  
 admin_time_message = None   
 
-
 # ---------------------------------------------------------
-# 1. User UI Components (สำหรับห้องจองของลูกกิลด์)
+# UI Components
 # ---------------------------------------------------------
 class HouseSelect(Select):
     def __init__(self, zone_key: str):
@@ -75,14 +83,13 @@ class HouseSelect(Select):
         options = []
         for i in range(1, config["count"] + 1):
             house_id = f"{zone_key}-{i}"
-            
             users = booked_houses.get(house_id, [])
             if users:
                 count_str = f" ({len(users)} คน)" if len(users) > 1 else ""
                 options.append(discord.SelectOption(
                     label=f"{config['prefix']} - {i}{count_str}",
                     value=house_id,
-                    description="กดเพื่อจอง / กดซ้ำเพื่อยกเลิกการจองของคุณ",
+                    description="กดเพื่อจอง / กดซ้ำเพื่อยกเลิก",
                     emoji="🔴"
                 ))
             else:
@@ -108,18 +115,15 @@ class HouseSelect(Select):
         if selected_house_id not in booked_houses:
             booked_houses[selected_house_id] = []
 
-        # ถ้าเคยจองไว้แล้ว กดซ้ำจะยกเลิก
         if user_id in booked_houses[selected_house_id]:
             booked_houses[selected_house_id].remove(user_id)
             if not booked_houses[selected_house_id]:
                 del booked_houses[selected_house_id]
         else:
-            # เพิ่มชื่อต่อท้ายคิว
             booked_houses[selected_house_id].append(user_id)
 
         await interaction.response.defer()
         await refresh_all_views()
-
 
 class WarDashboardView(View):
     def __init__(self):
@@ -127,10 +131,6 @@ class WarDashboardView(View):
         for zone in ["MAIN", "IN1", "IN2", "IN3"]:
             self.add_item(HouseSelect(zone))
 
-
-# ---------------------------------------------------------
-# 2. Time Selection UI Components (สำหรับห้องเลือกเวลาตี)
-# ---------------------------------------------------------
 class TimeSelect(Select):
     def __init__(self):
         options = []
@@ -161,16 +161,11 @@ class TimeSelect(Select):
         await interaction.response.defer()
         await refresh_all_views()
 
-
 class TimeDashboardView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TimeSelect())
 
-
-# ---------------------------------------------------------
-# 3. Admin UI Components (แผงควบคุมของแอดมิน)
-# ---------------------------------------------------------
 class AdminUnbookSelect(Select):
     def __init__(self, zone_key: str):
         self.zone_key = zone_key
@@ -216,7 +211,6 @@ class AdminUnbookSelect(Select):
         await interaction.response.defer()
         await refresh_all_views()
 
-
 class AdminRemoveTimeSelect(Select):
     def __init__(self, time_key: str):
         self.time_key = time_key
@@ -257,19 +251,17 @@ class AdminRemoveTimeSelect(Select):
 
         await refresh_all_views()
 
-
 class AdminHouseControlView(View):
     def __init__(self):
         super().__init__(timeout=None)
         for zone in ["MAIN", "IN1", "IN2", "IN3"]:
             self.add_item(AdminUnbookSelect(zone))
 
-    @button(label="🧹 ล้างข้อมูลการจองบ้านทั้งหมด", style=discord.ButtonStyle.primary, row=4)
+    @button(label="🧹 ล้างข้อมูลการจองบ้านทั้งหมด", style=discord.ButtonStyle.primary, row=4, custom_id="btn_reset_houses")
     async def reset_houses_button(self, interaction: discord.Interaction, button: Button):
         booked_houses.clear()
         await interaction.response.edit_message(view=AdminHouseControlView())
         await refresh_all_views()
-
 
 class AdminTimeControlView(View):
     def __init__(self):
@@ -277,13 +269,12 @@ class AdminTimeControlView(View):
         for time_key in TIME_SLOTS.keys():
             self.add_item(AdminRemoveTimeSelect(time_key))
 
-    @button(label="⚠️ ล้างข้อมูลทั้งหมด (บ้าน + เวลา)", style=discord.ButtonStyle.danger, row=4)
+    @button(label="⚠️ ล้างข้อมูลทั้งหมด (บ้าน + เวลา)", style=discord.ButtonStyle.danger, row=4, custom_id="btn_reset_all")
     async def reset_all_button(self, interaction: discord.Interaction, button: Button):
         booked_houses.clear()
         user_time_slots.clear()
         await interaction.response.edit_message(view=AdminTimeControlView())
         await refresh_all_views()
-
 
 # ---------------------------------------------------------
 # Helper Functions
@@ -298,7 +289,6 @@ def create_war_embed():
         color=discord.Color.blue()
     )
 
-    # 1. จัดการบ้านหลัก
     main_status = []
     for i in range(1, 11):
         house_id = f"MAIN-{i}"
@@ -316,7 +306,6 @@ def create_war_embed():
         inline=False
     )
 
-    # 2. จัดการบ้านใน (1-3)
     for zone_key in ["IN1", "IN2", "IN3"]:
         config = HOUSES_CONFIG[zone_key]
         status_list = []
@@ -340,7 +329,6 @@ def create_war_embed():
 
     embed.set_footer(text="ระบบอัปเดตสถานะอัตโนมัติแบบ Real-time")
     return embed
-
 
 def create_time_embed():
     embed = discord.Embed(
@@ -373,9 +361,7 @@ def create_time_embed():
     embed.set_footer(text="ระบบอัปเดตสถานะอัตโนมัติแบบ Real-time")
     return embed
 
-
 async def refresh_all_views():
-    """อัปเดตข้อความและเมนูทั้งฝั่งลูกกิลด์และแอดมินทุกห้องให้ตรงกับข้อมูลปัจจุบัน"""
     global user_war_message, user_time_message, admin_house_message, admin_time_message
 
     if user_war_message:
@@ -401,7 +387,6 @@ async def refresh_all_views():
             await admin_time_message.edit(view=AdminTimeControlView())
         except Exception as e:
             print(f"Error refreshing admin time view: {e}")
-
 
 # ---------------------------------------------------------
 # Automated Tasks & Bot Commands
