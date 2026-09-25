@@ -8,7 +8,7 @@ from discord.ui import Select, View, button, Button
 from flask import Flask
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # ตัวสั่งให้ Python อ่านไฟล์ .env ในเครื่อง
 
 # ---------------------------------------------------------
 # Web Server สำหรับ Keep Alive / Health Check
@@ -33,25 +33,13 @@ def keep_alive():
 # ---------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-
-class GuildWarBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-
-    async def setup_hook(self):
-        # ลงทะเบียน View ให้คงสถานะอยู่ถาวร (Persistent Views)
-        self.add_view(WarDashboardView())
-        self.add_view(TimeDashboardView())
-        self.add_view(AdminHouseControlView())
-        self.add_view(AdminTimeControlView())
-
-bot = GuildWarBot()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------------------------------------------------
 # ระบบเก็บข้อมูลในหน่วยความจำ (In-Memory Data Structures)
 # ---------------------------------------------------------
-booked_houses = {}      
-user_time_slots = {}    
+booked_houses = {}      # Format: {"MAIN-1": user_id, "IN1-3": user_id}
+user_time_slots = {}    # Format: {user_id: "21:00"}
 
 HOUSES_CONFIG = {
     "MAIN": {"label": "👑 บ้านหลัก", "placeholder": "ปลดล็อกบ้านหลัก", "count": 10, "prefix": "บ้านหลัก"},
@@ -67,13 +55,15 @@ TIME_SLOTS = {
     "23:00": "🌌 หลัง 5 ทุ่ม",
 }
 
+# ตัวแปร Global สำหรับเก็บอ้างอิงข้อความ (Message References)
 user_war_message = None   
 user_time_message = None  
 admin_house_message = None  
 admin_time_message = None   
 
+
 # ---------------------------------------------------------
-# UI Components
+# 1. User UI Components (สำหรับห้องจองของลูกกิลด์)
 # ---------------------------------------------------------
 class HouseSelect(Select):
     def __init__(self, zone_key: str):
@@ -83,13 +73,12 @@ class HouseSelect(Select):
         options = []
         for i in range(1, config["count"] + 1):
             house_id = f"{zone_key}-{i}"
-            users = booked_houses.get(house_id, [])
-            if users:
-                count_str = f" ({len(users)} คน)" if len(users) > 1 else ""
+            
+            if house_id in booked_houses:
                 options.append(discord.SelectOption(
-                    label=f"{config['prefix']} - {i}{count_str}",
+                    label=f"{config['prefix']} - {i} (จองแล้ว)",
                     value=house_id,
-                    description="กดเพื่อจอง / กดซ้ำเพื่อยกเลิก",
+                    description="กดซ้ำเพื่อยกเลิกการจอง",
                     emoji="🔴"
                 ))
             else:
@@ -110,20 +99,17 @@ class HouseSelect(Select):
 
     async def callback(self, interaction: discord.Interaction):
         selected_house_id = self.values[0]
-        user_id = interaction.user.id
+        user = interaction.user
 
-        if selected_house_id not in booked_houses:
-            booked_houses[selected_house_id] = []
-
-        if user_id in booked_houses[selected_house_id]:
-            booked_houses[selected_house_id].remove(user_id)
-            if not booked_houses[selected_house_id]:
+        if selected_house_id in booked_houses:
+            if booked_houses[selected_house_id] == user.id:
                 del booked_houses[selected_house_id]
         else:
-            booked_houses[selected_house_id].append(user_id)
+            booked_houses[selected_house_id] = user.id
 
         await interaction.response.defer()
         await refresh_all_views()
+
 
 class WarDashboardView(View):
     def __init__(self):
@@ -131,6 +117,10 @@ class WarDashboardView(View):
         for zone in ["MAIN", "IN1", "IN2", "IN3"]:
             self.add_item(HouseSelect(zone))
 
+
+# ---------------------------------------------------------
+# 2. Time Selection UI Components (สำหรับห้องเลือกเวลาตี)
+# ---------------------------------------------------------
 class TimeSelect(Select):
     def __init__(self):
         options = []
@@ -161,11 +151,16 @@ class TimeSelect(Select):
         await interaction.response.defer()
         await refresh_all_views()
 
+
 class TimeDashboardView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TimeSelect())
 
+
+# ---------------------------------------------------------
+# 3. Admin UI Components (แผงควบคุมของแอดมิน)
+# ---------------------------------------------------------
 class AdminUnbookSelect(Select):
     def __init__(self, zone_key: str):
         self.zone_key = zone_key
@@ -174,14 +169,14 @@ class AdminUnbookSelect(Select):
         options = []
         for i in range(1, config["count"] + 1):
             house_id = f"{zone_key}-{i}"
-            if house_id in booked_houses and booked_houses[house_id]:
-                for uid in booked_houses[house_id]:
-                    options.append(discord.SelectOption(
-                        label=f"ปลด: {config['prefix']} - {i}",
-                        value=f"{house_id}:{uid}",
-                        description=f"ลบผู้จอง ID: {uid}",
-                        emoji="🔓"
-                    ))
+            if house_id in booked_houses:
+                user_id = booked_houses[house_id]
+                options.append(discord.SelectOption(
+                    label=f"ปลดล็อก: {config['prefix']} - {i}",
+                    value=house_id,
+                    description=f"ผู้จอง ID: {user_id}",
+                    emoji="🔓"
+                ))
 
         if not options:
             options.append(discord.SelectOption(
@@ -199,17 +194,14 @@ class AdminUnbookSelect(Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        if self.values[0] != "none":
-            house_id, uid_str = self.values[0].split(":")
-            target_uid = int(uid_str)
-            
-            if house_id in booked_houses and target_uid in booked_houses[house_id]:
-                booked_houses[house_id].remove(target_uid)
-                if not booked_houses[house_id]:
-                    del booked_houses[house_id]
-
+        selected_house_id = self.values[0]
         await interaction.response.defer()
+
+        if selected_house_id in booked_houses:
+            del booked_houses[selected_house_id]
+
         await refresh_all_views()
+
 
 class AdminRemoveTimeSelect(Select):
     def __init__(self, time_key: str):
@@ -251,17 +243,19 @@ class AdminRemoveTimeSelect(Select):
 
         await refresh_all_views()
 
+
 class AdminHouseControlView(View):
     def __init__(self):
         super().__init__(timeout=None)
         for zone in ["MAIN", "IN1", "IN2", "IN3"]:
             self.add_item(AdminUnbookSelect(zone))
 
-    @button(label="🧹 ล้างข้อมูลการจองบ้านทั้งหมด", style=discord.ButtonStyle.primary, row=4, custom_id="btn_reset_houses")
+    @button(label="🧹 ล้างข้อมูลการจองบ้านทั้งหมด", style=discord.ButtonStyle.primary, row=4)
     async def reset_houses_button(self, interaction: discord.Interaction, button: Button):
         booked_houses.clear()
         await interaction.response.edit_message(view=AdminHouseControlView())
         await refresh_all_views()
+
 
 class AdminTimeControlView(View):
     def __init__(self):
@@ -269,12 +263,13 @@ class AdminTimeControlView(View):
         for time_key in TIME_SLOTS.keys():
             self.add_item(AdminRemoveTimeSelect(time_key))
 
-    @button(label="⚠️ ล้างข้อมูลทั้งหมด (บ้าน + เวลา)", style=discord.ButtonStyle.danger, row=4, custom_id="btn_reset_all")
+    @button(label="⚠️ ล้างข้อมูลทั้งหมด (บ้าน + เวลา)", style=discord.ButtonStyle.danger, row=4)
     async def reset_all_button(self, interaction: discord.Interaction, button: Button):
         booked_houses.clear()
         user_time_slots.clear()
         await interaction.response.edit_message(view=AdminTimeControlView())
         await refresh_all_views()
+
 
 # ---------------------------------------------------------
 # Helper Functions
@@ -292,11 +287,9 @@ def create_war_embed():
     main_status = []
     for i in range(1, 11):
         house_id = f"MAIN-{i}"
-        users = booked_houses.get(house_id, [])
-        if users:
-            first_user = f"<@{users[0]}>"
-            count_suffix = f" **({len(users)})**" if len(users) > 1 else ""
-            main_status.append(f"🔴 **{i}**: {first_user}{count_suffix}")
+        if house_id in booked_houses:
+            user_id = booked_houses[house_id]
+            main_status.append(f"🔴 **{i}**: <@{user_id}>")
         else:
             main_status.append(f"⚪ `{i}`")
 
@@ -311,11 +304,9 @@ def create_war_embed():
         status_list = []
         for i in range(1, config["count"] + 1):
             house_id = f"{zone_key}-{i}"
-            users = booked_houses.get(house_id, [])
-            if users:
-                first_user = f"<@{users[0]}>"
-                count_suffix = f" **({len(users)})**" if len(users) > 1 else ""
-                status_list.append(f"🔴 **{i}**: {first_user}{count_suffix}")
+            if house_id in booked_houses:
+                user_id = booked_houses[house_id]
+                status_list.append(f"🔴 **{i}**: <@{user_id}>")
             else:
                 status_list.append(f"⚪ `{i}`")
         
@@ -329,6 +320,7 @@ def create_war_embed():
 
     embed.set_footer(text="ระบบอัปเดตสถานะอัตโนมัติแบบ Real-time")
     return embed
+
 
 def create_time_embed():
     embed = discord.Embed(
@@ -361,7 +353,9 @@ def create_time_embed():
     embed.set_footer(text="ระบบอัปเดตสถานะอัตโนมัติแบบ Real-time")
     return embed
 
+
 async def refresh_all_views():
+    """อัปเดตข้อความและเมนูทั้งฝั่งลูกกิลด์และแอดมินทุกห้องให้ตรงกับข้อมูลปัจจุบัน"""
     global user_war_message, user_time_message, admin_house_message, admin_time_message
 
     if user_war_message:
@@ -388,9 +382,11 @@ async def refresh_all_views():
         except Exception as e:
             print(f"Error refreshing admin time view: {e}")
 
+
 # ---------------------------------------------------------
 # Automated Tasks & Bot Commands
 # ---------------------------------------------------------
+# กำหนดเวลารีเซตอัตโนมัติเป็น 07:00 น. ตรงตาม timezone ประเทศไทย (Asia/Bangkok)
 RESET_TIME = datetime.time(hour=7, minute=0, second=0, tzinfo=ZoneInfo("Asia/Bangkok"))
 
 @tasks.loop(time=RESET_TIME)
@@ -465,7 +461,7 @@ async def reset_war(ctx):
 # จุดเริ่มต้นการทำงาน
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    keep_alive()
+    keep_alive()  # เรียกเปิด Web Server ตรวจสอบสถานะ
     
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
